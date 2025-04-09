@@ -1,14 +1,21 @@
 # Configuration settings for Shadow Bot
 
-# Language for STT and TTS
-LANGUAGE = "en"
+# Supported Languages
+# Define the languages the bot can understand and speak
+# Format: { "short_code": "google_tts_code" }
+SUPPORTED_LANGUAGES = {
+    "en": "en",      # English
+    "bn": "bn-BD"    # Bengali (Bangladesh)
+}
+DEFAULT_LANGUAGE = "en" # Default language if detection fails or for initial messages
 
 # Temporary file path for TTS audio output
 AUDIO_FILE = "response.mp3"
 
-# Wake word settings
+# Wake word settings (Keep wake words primarily in one language for simplicity, e.g., English)
 WAKE_WORD_ENABLED = True
-WAKE_WORDS = ["hey shadow bot", "shadow bot", "hey shadow", "shadow"]
+WAKE_WORDS = ["hey shadow bot", "shadow bot", "hey shadow", "shadow"] # English wake words
+WAKE_WORD_LANG = "en-US" # Language for wake word recognition
 WAKE_WORD_TIMEOUT = 10  # Seconds to listen for a command after wake word
 
 # Command parsing settings

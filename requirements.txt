@@ -4,3 +4,4 @@ gTTS
 playsound
 fuzzywuzzy
 python-Levenshtein
+langdetect
