@@ -1,0 +1,6 @@
+SpeechRecognition
+PyAudio
+gTTS
+playsound
+fuzzywuzzy
+python-Levenshtein
