@@ -5,3 +5,6 @@ playsound
 fuzzywuzzy
 python-Levenshtein
 langdetect
+PyGObject
+pydub
+vosk
