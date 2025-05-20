@@ -67,6 +67,93 @@ except Exception as e:
     print(f"Error initializing Gemini API: {e}")
     gemini_model = None # Set model to None if initialization fails
 
+# --- Chat Context Memory ---
+chat_history = []
+MAX_CHAT_HISTORY = 10  # Maximum number of interactions to remember
+
+def add_to_chat_history(role, content):
+    """Add a message to chat history and maintain the size limit."""
+    chat_history.append({"role": role, "content": content})
+    if len(chat_history) > MAX_CHAT_HISTORY:
+        chat_history.pop(0)  # Remove oldest message
+
+def get_gemini_response(prompt):
+    """Sends a prompt to the Gemini API and returns the response text."""
+    if gemini_model is None:
+        print("Gemini model not initialized. Cannot get response.")
+        return get_response_string("gemini_error")
+
+    print(f"Sending prompt to Gemini: {prompt}")
+    try:
+        # Add user's message to chat history
+        add_to_chat_history("user", prompt)
+        
+        # Create context-aware prompt with instructions for concise response
+        context_prompt = "You are a voice assistant. Keep responses brief and conversational (1-2 sentences). Previous conversation:\n"
+        for msg in chat_history[:-1]:  # Exclude the current message
+            context_prompt += f"{msg['role']}: {msg['content']}\n"
+        context_prompt += f"\nCurrent message:\n{prompt}\n\nRemember: Keep your response brief and conversational."
+        
+        response = gemini_model.generate_content(context_prompt)
+        cleaned_text = re.sub(r'[*#]', '', response.text).strip()
+        
+        # Further clean up response to ensure it's concise
+        # Split into sentences and take first 2 if there are more
+        sentences = cleaned_text.split('.')
+        sentences = [s.strip() for s in sentences if s.strip()]
+        if len(sentences) > 2:
+            cleaned_text = '. '.join(sentences[:2]) + '.'
+        
+        print(f"Gemini Response: {cleaned_text}")
+        
+        # Add Gemini's response to chat history
+        add_to_chat_history("assistant", cleaned_text)
+        
+        return cleaned_text
+    except Exception as e:
+        print(f"Gemini API error: {e}")
+        return get_response_string("gemini_error")
+
+# Modify the wake word logic
+wake_word_activated = False
+
+def listen_for_wake_word():
+    """
+    Listen for wake word only once at startup.
+    """
+    global wake_word_activated
+    
+    if not WAKE_WORD_ENABLED or wake_word_activated:
+        return True
+
+    print("Listening for wake word...")
+
+    r_wake = sr.Recognizer()
+    for attempt in range(MAX_RETRY_ATTEMPTS):
+        audio = listen_for_audio(timeout=None, phrase_time_limit=3, adjust_noise=(attempt == 0))
+        if audio is None:
+            continue
+
+        try:
+            text = r_wake.recognize_google(audio, language="en-US")
+            print(f"Wake word attempt recognized: {text}")
+            text_lower = text.lower()
+            if any(wake_word in text_lower for wake_word in WAKE_WORDS):
+                print(f"Wake word detected: {text}")
+                wake_word_activated = True
+                return True
+        except sr.UnknownValueError:
+            pass
+        except sr.RequestError as e:
+            print(f"Wake word recognition request failed; {e}")
+            continue
+        except Exception as e:
+            print(f"Error during wake word recognition: {e}")
+            continue
+
+    print("Wake word not detected.")
+    return False
+
 # --- Bot Logic (formerly bot_brain.py) ---
 
 # --- Context Memory ---
@@ -321,75 +408,60 @@ def retry_operation(operation_func, *args, **kwargs):
     """
     Retry an operation multiple times with a delay between attempts.
     """
-    for attempt in range(MAX_RETRY_ATTEMPTS): # Use variable directly
+    for attempt in range(MAX_RETRY_ATTEMPTS):
         try:
             return operation_func(*args, **kwargs)
         except Exception as e:
-            print(f"Operation failed (attempt {attempt+1}/{MAX_RETRY_ATTEMPTS}): {e}") # Use variable directly
-            if attempt < MAX_RETRY_ATTEMPTS - 1: # Use variable directly
-                print(f"Retrying in {RETRY_DELAY} seconds...") # Use variable directly
-                time.sleep(RETRY_DELAY) # Use variable directly
+            print(f"Operation failed (attempt {attempt+1}/{MAX_RETRY_ATTEMPTS}): {e}")
+            if attempt < MAX_RETRY_ATTEMPTS - 1:
+                print(f"Retrying in {RETRY_DELAY} seconds...")
+                time.sleep(RETRY_DELAY)
             else:
                 print("Maximum retry attempts reached. Operation failed.")
                 return None
 
 # --- Core Functions ---
 
-def speak(text, lang_code=DEFAULT_LANGUAGE):
+def speak(text):
     """Converts text to speech using gTTS and plays it using pydub."""
-    lang_config = SUPPORTED_LANGUAGES.get(lang_code, SUPPORTED_LANGUAGES[DEFAULT_LANGUAGE])
-    tts_code = lang_config['tts']
-    print(f"Shadow Bot ({tts_code}): {text}") # Print what the bot intends to say
+    print(f"Shadow Bot: {text}")
 
     def _speak_operation():
-        tts = gTTS(text=text, lang=tts_code, slow=False)
+        tts = gTTS(text=text, lang="en", slow=False)
         with tempfile.NamedTemporaryFile(delete=True, suffix=".mp3") as fp:
             temp_path = fp.name
             tts.save(temp_path)
-            # Load the audio file using pydub
             sound = AudioSegment.from_mp3(temp_path)
-            # Play the audio file
             play(sound)
-        return True # Indicate success
+        return True
 
-    # Retry the speak operation if it fails
     result = retry_operation(_speak_operation)
     if result is None:
-        fallback_lang_config = SUPPORTED_LANGUAGES[DEFAULT_LANGUAGE]
-        fallback_tts_code = fallback_lang_config['tts']
-        print(f"Failed to speak in {tts_code}. Using fallback print method.")
-        # Fallback: Just print the text if audio fails completely
-        # print(f"Shadow Bot ({fallback_tts_code}) would say: {text}") # Already printed above
+        print("Failed to speak. Using fallback print method.")
 
 def listen_for_audio(timeout=5, phrase_time_limit=10, adjust_noise=True):
     """
     Base function to listen for audio input.
     """
     r = sr.Recognizer()
-    # Apply microphone settings from config
-    r.pause_threshold = PAUSE_THRESHOLD 
+    r.pause_threshold = PAUSE_THRESHOLD
     if not DYNAMIC_ENERGY_THRESHOLD:
-        # Only set manually if dynamic adjustment is disabled
         try:
-           # Check if ENERGY_THRESHOLD is defined (might be commented out)
-           r.energy_threshold = ENERGY_THRESHOLD 
+            r.energy_threshold = ENERGY_THRESHOLD
         except NameError:
-           print("Warning: DYNAMIC_ENERGY_THRESHOLD is False, but ENERGY_THRESHOLD is not defined. Using default.")
-           # Let the library use its default if ENERGY_THRESHOLD isn't set
+            print("Warning: DYNAMIC_ENERGY_THRESHOLD is False, but ENERGY_THRESHOLD is not defined. Using default.")
 
     with sr.Microphone() as source:
-        if adjust_noise and DYNAMIC_ENERGY_THRESHOLD: # Only adjust dynamically if enabled
+        if adjust_noise and DYNAMIC_ENERGY_THRESHOLD:
             print(f"Adjusting for ambient noise ({ADJUST_NOISE_DURATION} sec)...")
             r.adjust_for_ambient_noise(source, duration=ADJUST_NOISE_DURATION)
             print(f"Dynamic energy threshold set to: {r.energy_threshold:.2f}")
         elif not DYNAMIC_ENERGY_THRESHOLD:
-             print(f"Using fixed energy threshold: {r.energy_threshold}")
-
+            print(f"Using fixed energy threshold: {r.energy_threshold}")
 
         try:
             print(f"Listening... (Timeout: {timeout}s, Pause Threshold: {r.pause_threshold}s, Phrase Limit: {phrase_time_limit}s)")
-            # Pass phrase_time_limit to r.listen
-            audio = r.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit) 
+            audio = r.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
             return audio
         except sr.WaitTimeoutError:
             print("No audio detected within timeout period.")
@@ -400,143 +472,57 @@ def listen_for_audio(timeout=5, phrase_time_limit=10, adjust_noise=True):
 
 def recognize_speech(audio):
     """
-    Attempt to recognize speech in supported languages.
+    Attempt to recognize speech in English.
     """
     if audio is None:
-        return None, None
+        return None
 
     r = sr.Recognizer()
-    recognized_text = None
-    detected_lang = None
-
-    # Try recognizing in each supported language
-    for lang_code, lang_details in SUPPORTED_LANGUAGES.items(): # Use variable directly
-        stt_code = lang_details['stt'] # Get the STT code (e.g., 'en-US', 'bn-BD')
-        try:
-            print(f"Attempting recognition in {stt_code}...")
-            text = r.recognize_google(audio, language=stt_code) # Use the specific STT code
-            print(f"Recognized as {stt_code}: {text}")
-            # Simple approach: return the first successful recognition
-            recognized_text = text.lower()
-            detected_lang = lang_code # Return the short code ('en', 'bn')
-            break # Stop after first successful recognition
-        except sr.UnknownValueError:
-            print(f"Could not understand audio as {stt_code}.")
-            continue # Try next language
-        except sr.RequestError as e:
-            print(f"Could not request results from Google ({stt_code}); {e}")
-            continue
-        except Exception as e:
-            print(f"Error during {stt_code} speech recognition: {e}")
-            continue
-
-    # detected_lang will be None if all recognitions failed, or the short code if one succeeded
-    return recognized_text, detected_lang
-
-def listen_for_wake_word():
-    """
-    Listen specifically for wake words using the configured wake word STT language.
-    """
-    if not WAKE_WORD_ENABLED: # Use variable directly
-        return True  # Skip wake word detection if disabled
-
-    wake_word_stt_lang = WAKE_WORD_LANG_STT # Use variable directly
-    print(f"Listening for wake word in {wake_word_stt_lang}...")
-
-    r_wake = sr.Recognizer()
-    for attempt in range(MAX_RETRY_ATTEMPTS): # Use variable directly
-        audio = listen_for_audio(timeout=None, phrase_time_limit=3, adjust_noise=(attempt == 0))
-        if audio is None:
-            continue
-
-        try:
-            # Use the specific wake word STT language recognizer
-            text = r_wake.recognize_google(audio, language=wake_word_stt_lang)
-            print(f"Wake word attempt recognized: {text}")
-            text_lower = text.lower()
-            # Check if any English wake word is in the recognized text
-            # Assuming wake words in config are English for simplicity
-            if any(wake_word in text_lower for wake_word in WAKE_WORDS): # Use variable directly
-                print(f"Wake word detected: {text}")
-                return True
-        except sr.UnknownValueError:
-            pass
-        except sr.RequestError as e:
-            print(f"Wake word recognition request failed ({wake_word_stt_lang}); {e}")
-            continue
-        except Exception as e:
-            print(f"Error during wake word recognition ({wake_word_stt_lang}): {e}")
-            continue
-
-    print("Wake word not detected.")
-    return False
+    try:
+        print("Attempting recognition in English...")
+        text = r.recognize_google(audio, language="en-US")
+        print(f"Recognized: {text}")
+        return text.lower()
+    except sr.UnknownValueError:
+        print("Could not understand audio.")
+        return None
+    except sr.RequestError as e:
+        print(f"Could not request results from Google; {e}")
+        return None
+    except Exception as e:
+        print(f"Error during speech recognition: {e}")
+        return None
 
 def listen_for_command():
     """
-    Listens for a command after wake word (if enabled), attempts recognition
-    in supported languages, and detects language.
+    Listens for a command after wake word (if enabled).
     """
-    # First check for wake word if enabled
-    if WAKE_WORD_ENABLED: # Use variable directly
+    if WAKE_WORD_ENABLED:
         if not listen_for_wake_word():
-            return None, None # No wake word detected
-        # Speak confirmation in default language after wake word
-        speak(get_response_string("wake_word_listening", DEFAULT_LANGUAGE), lang_code=DEFAULT_LANGUAGE) # Use variable directly
+            return None
+        speak(get_response_string("wake_word_listening"))
 
-    # Listen for the actual command
     print("Listening for command...")
-    audio = listen_for_audio(timeout=WAKE_WORD_TIMEOUT if WAKE_WORD_ENABLED else 5) # Use variables directly
+    audio = listen_for_audio(timeout=WAKE_WORD_TIMEOUT if WAKE_WORD_ENABLED else 5)
+    return recognize_speech(audio)
 
-    # Recognize speech in supported languages
-    recognized_text, detected_lang_code = recognize_speech(audio)
-
-    # Optional: Use langdetect as a fallback or confirmation if recognition worked
-    if recognized_text:
-        try:
-            detected_lang_by_lib = detect(recognized_text)
-            print(f"Langdetect detected: {detected_lang_by_lib}")
-            # You could add logic here to override recognizer's language if langdetect strongly disagrees
-            # For now, we trust the recognizer's result if it succeeded.
-            if detected_lang_by_lib not in SUPPORTED_LANGUAGES: # Use variable directly
-                 print(f"Warning: Langdetect result '{detected_lang_by_lib}' not in supported languages.")
-                 # Stick with the language from successful recognition or default
-                 detected_lang_code = detected_lang_code or DEFAULT_LANGUAGE # Use variable directly
-            elif detected_lang_code is None: # If recognition failed but langdetect worked
-                 # Trust langdetect if STT failed but detection worked
-                 if detected_lang_by_lib in SUPPORTED_LANGUAGES: # Use variable directly
-                    detected_lang_code = detected_lang_by_lib
-
-        except LangDetectException:
-            print("Language detection failed.")
-            # If detection fails, use the language from recognition if available, else default
-            detected_lang_code = detected_lang_code or DEFAULT_LANGUAGE # Use variable directly
-
-    # If recognition failed entirely, detected_lang_code will be None
-    # If recognition succeeded, detected_lang_code has the language code (short code like 'en' or 'bn')
-
-    # Ensure we always return a valid language code from our supported list, defaulting if necessary
-    final_lang_code = detected_lang_code if detected_lang_code in SUPPORTED_LANGUAGES else DEFAULT_LANGUAGE
-    
-    return recognized_text, final_lang_code
-
-def match_command(command_text, lang_code):
+def match_command(command_text):
     """
-    Match the command text to the closest command template for the given language.
+    Match the command text to the closest command template.
     """
-    if command_text is None or lang_code not in command_templates:
+    if command_text is None:
         return None, 0
 
-    lang_templates = command_templates[lang_code]
     best_match = None
     best_confidence = 0
 
-    for command_type, templates in lang_templates.items():
+    for command_type, templates in command_templates["en"].items():
         match, confidence = process.extractOne(command_text, templates)
         if confidence > best_confidence:
             best_match = command_type
             best_confidence = confidence
 
-    if best_confidence >= COMMAND_SIMILARITY_THRESHOLD * 100: # Use variable directly
+    if best_confidence >= COMMAND_SIMILARITY_THRESHOLD * 100:
         return best_match, best_confidence
     else:
         return None, 0
@@ -550,94 +536,45 @@ conversation_state = {
     "session_start_time": time.time()
 }
 
-def extract_user_name(command, lang_code):
+def extract_user_name(command):
     """
-    Extract a user's name from commands in the specified language.
+    Extract a user's name from commands.
     """
-    # Basic patterns - can be expanded
-    patterns = {
-        "en": [
-            r"(?:my name is|i am|i'm|call me) ([a-z]+)",
-            r"([a-z]+) is my name"
-        ],
-        "bn": [
-            r"(?:???? ???|??? ????|????? ?????) ([^\s]+)", # Matches Bengali name patterns
-            r"([^\s]+) ???? ???"
-        ]
-    }
+    patterns = [
+        r"(?:my name is|i am|i'm|call me) ([a-z]+)",
+        r"([a-z]+) is my name"
+    ]
 
-    if lang_code not in patterns:
-        return None
-
-    for pattern in patterns[lang_code]:
+    for pattern in patterns:
         match = re.search(pattern, command, re.IGNORECASE)
         if match:
-            # For simplicity, capitalize first letter. Might need refinement for different languages/names.
             return match.group(1).capitalize()
 
     return None
 
-# --- Gemini Function ---
-def get_gemini_response(prompt):
-    """Sends a prompt to the Gemini API and returns the response text."""
-    if gemini_model is None:
-        print("Gemini model not initialized. Cannot get response.")
-        # Return a specific error message or fallback
-        # For now, using a generic error response key
-        return get_response_string("gemini_error", DEFAULT_LANGUAGE) 
-
-    print(f"Sending prompt to Gemini: {prompt}")
-    try:
-        response = gemini_model.generate_content(prompt)
-        # Clean up response text (remove potential asterisks or markdown)
-        cleaned_text = re.sub(r'[*#]', '', response.text).strip()
-        print(f"Gemini Response: {cleaned_text}")
-        return cleaned_text
-    except Exception as e:
-        print(f"Gemini API error: {e}")
-        # Return a specific error message or fallback
-        return get_response_string("gemini_error", DEFAULT_LANGUAGE)
-
-
-def get_response_string(key, lang_code, **kwargs):
+def get_response_string(key, **kwargs):
     """
-    Retrieve a response string for the given key and language, performing formatting.
-    Handles fallback to default language if the key or language is missing.
+    Retrieve a response string for the given key, performing formatting.
     """
-    lang_to_use = lang_code if lang_code in responses else DEFAULT_LANGUAGE
-
-    response_options = responses.get(lang_to_use, {}).get(key)
-
-    # Fallback to default language if key not found in specified language
-    if response_options is None and lang_to_use != DEFAULT_LANGUAGE:
-        print(f"Warning: Response key '{key}' not found for language '{lang_to_use}'. Falling back to default.")
-        lang_to_use = DEFAULT_LANGUAGE
-        response_options = responses.get(lang_to_use, {}).get(key)
-
+    response_options = responses["en"].get(key)
     if response_options is None:
-        print(f"Error: Response key '{key}' not found even in default language '{DEFAULT_LANGUAGE}'.")
-        # Return a generic error message using the already defined generic_error key
-        error_lang = lang_code if lang_code in responses else DEFAULT_LANGUAGE
-        return responses.get(error_lang, {}).get("generic_error", ["Sorry, an internal error occurred."])[0]
+        print(f"Error: Response key '{key}' not found.")
+        return responses["en"].get("generic_error")
 
-
-    # If it's a list, choose randomly
     if isinstance(response_options, list):
         chosen_response = random.choice(response_options)
     else:
         chosen_response = response_options
 
-    # Perform formatting if arguments are provided
     try:
         return chosen_response.format(**kwargs)
     except KeyError as e:
-        print(f"Error formatting response key '{key}' for language '{lang_to_use}': Missing key {e}")
-        # Return the unformatted string or a generic error
+        print(f"Error formatting response key '{key}': Missing key {e}")
         return chosen_response
 
-def get_contextual_response(command_type, command_text, lang_code):
+def get_contextual_response(command_type, command_text):
     """
-    Generate a response based on command, text, language, and context.
+    Generate a response based on command and context.
     """
     recent_command_types = [item["command_type"] for item in context_memory]
     repetition = recent_command_types.count(command_type) if command_type else 0
@@ -647,101 +584,85 @@ def get_contextual_response(command_type, command_text, lang_code):
     # --- Handle response to previous question ---
     if conversation_state["expecting_response"] and conversation_state["last_question"]:
         last_q = conversation_state["last_question"]
-        conversation_state["expecting_response"] = False # Reset flag
+        conversation_state["expecting_response"] = False
 
         if last_q == "name" and command_type in ["user_name", "yes", "no"]:
-            name = extract_user_name(command_text, lang_code)
+            name = extract_user_name(command_text)
             if name:
                 conversation_state["user_name"] = name
-                response_text = get_response_string("user_name_confirm", lang_code, name=name)
-            else: # Failed to extract name
-                response_text = get_response_string("user_name_fail", lang_code)
-            return response_text, False # Don't ask another follow-up immediately
+                response_text = get_response_string("user_name_confirm", name=name)
+            else:
+                response_text = get_response_string("user_name_fail")
+            return response_text, False
 
         elif last_q == "how_are_you" and command_type:
             if command_type in ["greeting", "how_are_you", "yes"]:
-                response_text = get_response_string("how_are_you_resp_glad", lang_code)
+                response_text = get_response_string("how_are_you_resp_glad")
             elif command_type == "no":
-                 response_text = get_response_string("how_are_you_resp_sorry", lang_code)
-                 should_ask_followup = True # Maybe ask if we can help
-            else: # Unclear response to "how are you?"
-                 response_text = get_response_string("unknown", lang_code)
+                response_text = get_response_string("how_are_you_resp_sorry")
+                should_ask_followup = True
+            else:
+                response_text = get_response_string("unknown")
             return response_text, should_ask_followup
 
         elif last_q == "another_joke":
-             if command_type == "yes":
-                 command_type = "joke" # Trigger another joke
-             else:
-                 response_text = get_response_string("no_generic", lang_code)
-                 return response_text, False
-
+            if command_type == "yes":
+                command_type = "joke"
+            else:
+                response_text = get_response_string("no_generic")
+                return response_text, False
 
     # --- Handle specific command types ---
     if command_type == "greeting":
-        base_greetings = responses.get(lang_code, responses[DEFAULT_LANGUAGE]).get("greeting", []) # Use variable directly
         if conversation_state["user_name"]:
-            # Attempt personalized greeting (simple format for now)
-            # Ensure base_greetings is not empty before accessing index 0
-            if base_greetings:
-                 first_greeting = random.choice(base_greetings)
-                 greeting_part1 = first_greeting.split('!')[0] if '!' in first_greeting else first_greeting
-                 greeting_part2 = first_greeting.split('!')[1] if '!' in first_greeting and len(first_greeting.split('!')) > 1 else ""
-                 personalized_greeting = f"{greeting_part1}, {conversation_state['user_name']}!"
-                 response_text = personalized_greeting + greeting_part2
-            else: # Fallback if no greetings defined
-                 response_text = f"Hello, {conversation_state['user_name']}!"
-
+            first_greeting = random.choice(responses["en"]["greeting"])
+            greeting_part1 = first_greeting.split('!')[0] if '!' in first_greeting else first_greeting
+            greeting_part2 = first_greeting.split('!')[1] if '!' in first_greeting and len(first_greeting.split('!')) > 1 else ""
+            personalized_greeting = f"{greeting_part1}, {conversation_state['user_name']}!"
+            response_text = personalized_greeting + greeting_part2
         else:
-             response_text = random.choice(base_greetings) if base_greetings else "Hello!"
-
+            response_text = random.choice(responses["en"]["greeting"])
 
         if repetition > 1:
-            response_text = get_response_string("greeting_repeat", lang_code)
-        elif not conversation_topics["how_are_you"]["asked"] and random.random() < 0.3:
-            conversation_topics["how_are_you"]["asked"] = True
+            response_text = get_response_string("greeting_repeat")
+        elif random.random() < 0.3:
             conversation_state["expecting_response"] = True
             conversation_state["last_question"] = "how_are_you"
-            response_text += get_response_string("greeting_followup", lang_code)
+            response_text += get_response_string("greeting_followup")
 
     elif command_type == "how_are_you":
-        response_text = get_response_string("how_are_you", lang_code)
+        response_text = get_response_string("how_are_you")
         conversation_state["expecting_response"] = True
         conversation_state["last_question"] = "how_are_you"
 
     elif command_type == "time":
-        # Format time based on language preference if needed, simple for now
         current_time_str = time.strftime("%I:%M %p")
-        if lang_code == 'bn':
-             # Convert time to Bangla numerals if desired (complex, skip for now)
-             # Or just use standard numerals
-             pass
         if repetition > 1:
-            response_text = get_response_string("time_repeat", lang_code, current_time=current_time_str)
+            response_text = get_response_string("time_repeat", current_time=current_time_str)
         else:
-            response_text = get_response_string("time", lang_code, current_time=current_time_str)
+            response_text = get_response_string("time", current_time=current_time_str)
 
     elif command_type == "name":
         if repetition > 1:
-            response_text = get_response_string("name_repeat", lang_code)
+            response_text = get_response_string("name_repeat")
         elif not conversation_state["user_name"] and random.random() < 0.5:
             conversation_state["expecting_response"] = True
             conversation_state["last_question"] = "name"
-            response_text = get_response_string("name_ask", lang_code)
+            response_text = get_response_string("name_ask")
         else:
-            response_text = get_response_string("name", lang_code)
+            response_text = get_response_string("name")
 
     elif command_type == "user_name":
-        name = extract_user_name(command_text, lang_code)
+        name = extract_user_name(command_text)
         if name:
             conversation_state["user_name"] = name
-            response_text = get_response_string("user_name_confirm", lang_code, name=name)
+            response_text = get_response_string("user_name_confirm", name=name)
         else:
-            response_text = get_response_string("user_name_fail", lang_code)
+            response_text = get_response_string("user_name_fail")
 
     elif command_type == "joke":
-        jokes_list = responses.get(lang_code, responses[DEFAULT_LANGUAGE]).get("joke", []) # Use variable directly
         used_jokes = [item["response"] for item in context_memory if item["command_type"] == "joke"]
-        available_jokes = [j for j in jokes_list if j not in used_jokes]
+        available_jokes = [j for j in responses["en"]["joke"] if j not in used_jokes]
 
         if available_jokes:
             joke = random.choice(available_jokes)
@@ -749,118 +670,107 @@ def get_contextual_response(command_type, command_text, lang_code):
             if random.random() < 0.3:
                 conversation_state["expecting_response"] = True
                 conversation_state["last_question"] = "another_joke"
-                response_text += get_response_string("joke_ask_more", lang_code)
+                response_text += get_response_string("joke_ask_more")
         else:
-            response_text = get_response_string("joke_out", lang_code)
+            response_text = get_response_string("joke_out")
 
     elif command_type == "thanks":
-        response_text = get_response_string("thanks", lang_code)
+        response_text = get_response_string("thanks")
 
     elif command_type == "capabilities":
-        response_text = get_response_string("capabilities", lang_code)
+        response_text = get_response_string("capabilities")
 
     elif command_type == "about_you":
-        response_text = get_response_string("about_you", lang_code)
+        response_text = get_response_string("about_you")
 
     elif command_type == "how_made":
-        response_text = get_response_string("how_made", lang_code)
+        response_text = get_response_string("how_made")
 
     elif command_type == "weather":
-        response_text = get_response_string("weather", lang_code)
+        response_text = get_response_string("weather")
 
     elif command_type == "exit":
         name = conversation_state.get("user_name")
         if name:
-             response_text = get_response_string("goodbye_personalized", lang_code, name=name)
+            response_text = get_response_string("goodbye_personalized", name=name)
         else:
-             # Use generic exit if name unknown or key missing
-             exit_responses_list = responses.get(lang_code, responses[DEFAULT_LANGUAGE]).get("exit", []) # Use variable directly
-             response_text = random.choice(exit_responses_list) if exit_responses_list else "Goodbye!"
-
+            response_text = random.choice(responses["en"]["exit"])
 
     elif command_type == "yes" and not conversation_state["last_question"]:
-        response_text = get_response_string("yes_generic", lang_code)
+        response_text = get_response_string("yes_generic")
     elif command_type == "no" and not conversation_state["last_question"]:
-        response_text = get_response_string("no_generic", lang_code)
+        response_text = get_response_string("no_generic")
 
     elif command_type == "why":
-        response_text = get_response_string("why", lang_code)
+        response_text = get_response_string("why")
 
     elif command_type == "what_else":
-        response_text = get_response_string("what_else", lang_code)
+        response_text = get_response_string("what_else")
 
     # --- Unknown command: Fallback to Gemini ---
     else:
         print(f"Command type '{command_type}' not recognized or no match. Querying Gemini...")
-        # Use the original command text as the prompt for Gemini
-        gemini_response = get_gemini_response(command_text) 
+        gemini_response = get_gemini_response(command_text)
         response_text = gemini_response
-        # Don't ask follow-up questions after a Gemini response for now
-        should_ask_followup = False 
+        should_ask_followup = False
 
     return response_text, should_ask_followup
 
-def generate_follow_up_question(lang_code):
+def generate_follow_up_question():
     """
-    Generate a follow-up question in the specified language based on context.
+    Generate a follow-up question based on context.
     """
-    # Ask for name?
     if not conversation_state["user_name"] and random.random() < 0.2:
         conversation_state["expecting_response"] = True
         conversation_state["last_question"] = "name"
-        return get_response_string("followup_name", lang_code)
+        return get_response_string("followup_name")
 
-    # Ask how they are?
     session_duration = time.time() - conversation_state["session_start_time"]
-    if session_duration > 60 and not conversation_topics["how_are_you"]["asked"] and random.random() < 0.3:
-        conversation_topics["how_are_you"]["asked"] = True
+    if session_duration > 60 and random.random() < 0.3:
         conversation_state["expecting_response"] = True
         conversation_state["last_question"] = "how_are_you"
-        return get_response_string("followup_how_are_you", lang_code)
+        return get_response_string("followup_how_are_you")
 
     return None
 
-def process_command(command, lang_code):
+def process_command(command):
     """
-    Processes the command text in the detected language.
+    Processes the command text.
     """
     if command is None:
-        if WAKE_WORD_ENABLED: # Use variable directly
-            return True # Just continue listening after wake word timeout
+        if WAKE_WORD_ENABLED and not wake_word_activated:
+            return True
         else:
-            # Speak "didn't hear" in the last used language or default
-            speak(get_response_string("no_command", lang_code), lang_code=lang_code)
+            speak(get_response_string("no_command"))
             return True
 
-    print(f"Processing command '{command}' in language '{lang_code}'")
+    print(f"Processing command '{command}'")
 
-    # Match command in the detected language
-    command_type, confidence = match_command(command, lang_code)
+    # Check if command starts with "how"
+    if command.lower().startswith("how"):
+        response = get_gemini_response(command)
+        speak(response)
+        return True
 
-    # Get response in the detected language
-    response, should_ask_followup = get_contextual_response(command_type, command, lang_code)
+    command_type, confidence = match_command(command)
+    response, should_ask_followup = get_contextual_response(command_type, command)
 
-    # Store interaction (including language)
     context_memory.append({
         "timestamp": time.time(),
         "command": command,
-        "lang_code": lang_code,
         "command_type": command_type,
         "confidence": confidence,
         "response": response
     })
 
-    # Speak the response in the detected language
-    speak(response, lang_code=lang_code)
+    speak(response)
 
-    # Ask follow-up question if needed, in the same language
     if should_ask_followup:
-        follow_up = generate_follow_up_question(lang_code)
+        follow_up = generate_follow_up_question()
         if follow_up:
             time.sleep(0.5)
-            speak(follow_up, lang_code=lang_code)
+            speak(follow_up)
 
-    # Exit?
     if command_type == "exit":
         return False
 
@@ -869,76 +779,63 @@ def process_command(command, lang_code):
 # --- Main Execution ---
 
 if __name__ == "__main__":
-    # Use default language for initial messages
-    default_lang = DEFAULT_LANGUAGE # Use variable directly
-
     try:
         conversation_state["session_start_time"] = time.time()
 
-        speak(get_response_string("activated_msg", default_lang), lang_code=default_lang)
+        speak(get_response_string("activated_msg"))
 
-        if WAKE_WORD_ENABLED: # Use variable directly
-            speak(get_response_string("wake_word_enabled_msg", default_lang, wake_word=WAKE_WORDS[0]), lang_code=default_lang) # Use variable directly
+        if WAKE_WORD_ENABLED:
+            speak(get_response_string("wake_word_enabled_msg", wake_word=WAKE_WORDS[0]))
+            if not listen_for_wake_word():
+                print("Wake word not detected. Exiting...")
+                exit(0)
+            speak(get_response_string("wake_word_listening"))
 
         time.sleep(0.5)
-        speak(get_response_string("initial_greeting", default_lang), lang_code=default_lang)
+        speak(get_response_string("initial_greeting"))
 
         running = True
         idle_time = 0
         last_activity = time.time()
-        last_lang_code = default_lang # Keep track of last used language for idle prompts
 
         while running:
             try:
                 current_time = time.time()
-                # Idle prompts in the last used language
                 if current_time - last_activity > 30 and idle_time == 0:
-                    speak(get_response_string("idle_prompt1", last_lang_code), lang_code=last_lang_code)
+                    speak(get_response_string("idle_prompt1"))
                     idle_time += 1
                 elif current_time - last_activity > 60 and idle_time == 1:
-                    speak(get_response_string("idle_prompt2", last_lang_code), lang_code=last_lang_code)
+                    speak(get_response_string("idle_prompt2"))
                     idle_time += 1
 
-                # Listen for command and detect language
-                command, lang_code = listen_for_command()
+                command = listen_for_command()
 
                 if command is not None:
                     last_activity = time.time()
                     idle_time = 0
-                    # Update last language only if recognition was successful
-                    if lang_code: 
-                        last_lang_code = lang_code 
-                
-                # If lang_code is None (recognition failed), use last known language for processing
-                # However, if command is also None, we don't process
-                if command is not None:
-                    process_lang = lang_code if lang_code else last_lang_code
-                    # Process command using detected (or last known) language
-                    running = process_command(command, process_lang)
+                    running = process_command(command)
                 else:
-                    # If command is None (e.g., wake word timeout), just loop back
-                    running = True 
+                    running = True
 
                 time.sleep(0.1)
 
             except KeyboardInterrupt:
-                speak(get_response_string("interrupt_msg", last_lang_code), lang_code=last_lang_code)
+                speak(get_response_string("interrupt_msg"))
                 running = False
             except Exception as e:
                 print(f"Error in main loop: {e}")
-                speak(get_response_string("error_loop_msg", last_lang_code), lang_code=last_lang_code)
+                speak(get_response_string("error_loop_msg"))
                 time.sleep(1)
 
-        print(get_response_string("shutdown_msg", last_lang_code))
+        print(get_response_string("shutdown_msg"))
 
-        # Final goodbye in last used language
         name = conversation_state.get("user_name")
         if name:
-            speak(get_response_string("goodbye_personalized", last_lang_code, name=name), lang_code=last_lang_code)
+            speak(get_response_string("goodbye_personalized", name=name))
         else:
-            speak(get_response_string("goodbye_msg", last_lang_code), lang_code=last_lang_code)
+            speak(get_response_string("goodbye_msg"))
 
     except Exception as e:
         print(f"Critical error: {e}")
-        # Try to speak error in default language
-        speak(get_response_string("critical_error_msg", default_lang), lang_code=default_lang)
+        speak(get_response_string("critical_error_msg"))
+

@@ -1,0 +1,48 @@
+graph TD
+    A[Start Project] --> B(Phase 1: Setup);
+
+    subgraph "Phase 1: Setup"
+        direction TB
+        B1["1. Setup Raspberry Pi: Install OS, Configure Network"] --> B2;
+        B2["2. Connect Hardware: Mic, Speaker, Optional Motors/Sensors"] --> B3;
+        B3["3. Test Hardware: arecord/aplay, GPIO checks"] --> B4;
+        B4["4. Install Software: apt update/upgrade, pip install libraries (STT, TTS, Audio, GPIO)"]
+    end
+
+    B --> C(Phase 2: Run `bot_brain.py`);
+
+    subgraph "Core Logic Loop (`bot_brain.py`)"
+        direction TB
+        C1["Initialize: Audio Streams, STT/TTS Engines"] --> C2;
+
+        subgraph "Optional Wake Word Listener"
+            C2 -- If Enabled --> WW1(Listen for Wake Word);
+            WW1 --> WW2{Wake Word Detected?};
+            WW2 -- Yes --> L1[Activate Command Listening];
+            WW2 -- No --> WW1; 
+        end
+
+        C2 -- If Disabled --> L1; 
+
+        L1 --> L2[Listen for Command via Mic];
+        L2 --> L3[Capture Audio Data];
+        L3 --> L4[Send Audio to STT Engine];
+        L4 --> L5[Receive Transcribed Text];
+        L5 --> P1{Parse Text for Command Intent};
+
+        P1 -- Command Understood --> E1{"Execute Action Based on Command"};
+        P1 -- "Command Not Understood" --> R1["Generate 'Cannot Understand' Response"]; 
+
+        E1 -- "Action requires Verbal Response (e.g., 'What time is it?')" --> R1["Generate Response via TTS"]; 
+        E1 -- "Action requires Hardware Control (e.g., 'Move Forward')" --> G1["Control GPIO Pins: Motors, LEDs"]; 
+        E1 -- "Action requires Both" --> G1; 
+
+        G1 --> R1["Generate Confirmation Response via TTS (Optional)"]; 
+        G1 --> L1; 
+
+        R1 --> S1[Play Generated Audio via Speaker];
+        S1 --> L1; 
+    end
+
+    C --> Z(Phase 3: Testing & Refinement);
+    Z --> C; 
